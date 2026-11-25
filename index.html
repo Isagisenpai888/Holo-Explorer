@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Holo Explorer</title>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{--c:#5fe6ff;--a:#ffc94a;--bg:#03070b}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--c);font:13px/1.4 "Chakra Petch",ui-monospace,monospace;overflow:hidden}
+#stage{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);overflow:hidden}
+#stage>canvas,#stage>video{position:absolute;inset:0;width:100%;height:100%}
+#vid{object-fit:cover}
+#three,#glow{mix-blend-mode:screen;pointer-events:none}
+#panel{position:fixed;top:12px;right:12px;display:flex;flex-direction:column;gap:6px;align-items:flex-end;z-index:5}
+#panel button{background:rgba(5,25,35,.7);color:var(--c);border:1px solid rgba(95,230,255,.5);padding:5px 12px;font:inherit;cursor:pointer;min-width:150px;text-align:left}
+#panel button:hover,#panel button:focus-visible{background:rgba(95,230,255,.2);outline:none}
+#panel label{display:flex;gap:8px;align-items:center;background:rgba(5,25,35,.7);border:1px solid rgba(95,230,255,.5);padding:5px 12px;min-width:150px;justify-content:space-between}
+#help{position:fixed;left:0;right:0;bottom:8px;text-align:center;padding:0 16px;color:rgba(95,230,255,.75);font-size:12px;z-index:5;pointer-events:none}
+#msg{position:fixed;left:12px;top:12px;z-index:5;color:var(--a);max-width:50vw}
+#tip{position:absolute;display:none;border:1px solid var(--a);background:rgba(30,20,0,.75);color:var(--a);padding:6px 10px;max-width:220px;z-index:4;pointer-events:none}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="vid" playsinline muted></video>
+  <canvas id="three"></canvas>
+  <canvas id="glow"></canvas>
+  <canvas id="ov"></canvas>
+  <div id="tip"></div>
+</div>
+<div id="msg">Starting camera…</div>
+<div id="panel">
+  <button id="bMirror"></button>
+  <button id="bBw"></button>
+  <button id="bCam"></button>
+  <label>Dim <input id="dim" type="range" min="0" max="100" value="40"></label>
+</div>
+<div id="help">Pinch &amp; hold: spawn · Fist: move · Point &amp; flick: spin · Two fists pull apart, palms together then apart, or twist a fist counter-clockwise: explode · Pinch a part to pull it out, hold for info · Release a pulled part near your wrist to wear it · Clap: assemble · E explode · C camera · B black &amp; white · F mirror · D debug · X clear · Snap or S: rings on/off · M mute · click once to enable sound &amp; mic</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}</script>
+<script type="module">
+import * as THREE from 'three';
+
+const $ = s => document.querySelector(s);
+const stage = $('#stage'), vid = $('#vid'), ov = $('#ov'), octx = ov.getContext('2d');
+const glow = $('#glow'), gctx = glow.getContext('2d'), tip = $('#tip'), msg = $('#msg');
+const S = { mirror: true, bw: false, debug: false, dim: .4 };
+let W = 0, H = 0, AR = 16 / 9;
+
+/* ---------- scene ---------- */
+const renderer = new THREE.WebGLRenderer({ canvas: $('#three'), alpha: true, antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setClearColor(0, 0);
+const scene = new THREE.Scene();
+let cam = new THREE.OrthographicCamera(-AR, AR, 1, -1, -10, 10);
+
+const mat = (c, o = .9) => new THREE.MeshBasicMaterial({ color: c, wireframe: true, transparent: true, opacity: o, blending: THREE.AdditiveBlending, depthWrite: false });
+const obj = new THREE.Group(); obj.visible = false; scene.add(obj);
+const parts = [];
+function addPart(mesh, name, info, dir) {
+  mesh.userData = { home: mesh.position.clone(), away: dir.clone().multiplyScalar(.5), name, info, pull: null, spin: (Math.random() - .5) * 3 };
+  obj.add(mesh); parts.push(mesh);
+}
+const core = new THREE.Mesh(new THREE.IcosahedronGeometry(.13, 2), mat(0xcffaff, 1));
+addPart(core, 'ARC CORE', 'Palladium fusion core. Output nominal.', new THREE.Vector3(0, 0, 0));
+const ringDefs = [[.22, 0, 0, 'INNER COIL', 'Magnetic containment, stage one.'], [.3, Math.PI / 2, 0, 'FIELD RING', 'Stabilises plasma flow.'], [.38, Math.PI / 3, Math.PI / 4, 'OUTER COIL', 'Heat exchange loop.']];
+ringDefs.forEach(([r, rx, ry, n, i], k) => {
+  const m = new THREE.Mesh(new THREE.TorusGeometry(r, .01, 6, 48), mat(0x5fe6ff, .9));
+  m.rotation.set(rx, ry, 0);
+  addPart(m, n, i, new THREE.Vector3(0, k - 1, k % 2 ? .3 : -.3));
+});
+for (let i = 0; i < 8; i++) {
+  const a = i * Math.PI / 4;
+  const m = new THREE.Mesh(new THREE.TorusGeometry(.5, .02, 5, 12, Math.PI / 4 * .8), mat(i % 3 ? 0x5fe6ff : 0xffc94a, .85));
+  m.rotation.z = a;
+  addPart(m, 'PLATE ' + (i + 1), 'Armour segment. Integrity 100%.', new THREE.Vector3(Math.cos(a + .39), Math.sin(a + .39), 0));
+}
+const shell = new THREE.Mesh(new THREE.IcosahedronGeometry(.18, 1), mat(0xffc94a, .5));
+addPart(shell, 'SHIELD', 'Inner plasma shield.', new THREE.Vector3(0, 0, 0));
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3 + .5, m = new THREE.Mesh(new THREE.OctahedronGeometry(.045, 0), mat(0xffc94a, .95)); m.position.set(Math.cos(a) * .62, Math.sin(a) * .62, 0); addPart(m, 'POD ' + (i + 1), 'Plasma injector pod. Charge 87%.', V(Math.cos(a), Math.sin(a), .6)); }
+const gear = new THREE.Mesh(new THREE.CylinderGeometry(.27, .27, .03, 14, 1), mat(0x5fe6ff, .6)); gear.rotation.x = Math.PI / 2; addPart(gear, 'ROTOR', 'Counter-rotating turbine rotor.', V(0, 0, .8));
+for (let i = 0; i < 10; i++) { const a = i * Math.PI / 5, m = new THREE.Mesh(new THREE.BoxGeometry(.05, .03, .03), mat(0x9ff3ff, .8)); m.position.set(Math.cos(a) * .45, Math.sin(a) * .45, .08 * Math.sin(a * 3)); m.rotation.z = a; addPart(m, 'NODE ' + (i + 1), 'Data relay node. Latency 2 ms.', V(Math.cos(a), Math.sin(a), -.7)); }
+addPart(new THREE.Mesh(new THREE.IcosahedronGeometry(.56, 1), mat(0x3aa8c8, .25)), 'LATTICE', 'Outer containment lattice.', V(0, 0, -1));
+for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2 + Math.PI / 4, m = new THREE.Mesh(new THREE.ConeGeometry(.03, .14, 4), mat(0xff6a7a, .9)); m.position.set(Math.cos(a) * .72, Math.sin(a) * .72, 0); m.rotation.z = a - Math.PI / 2; addPart(m, 'EMITTER ' + (i + 1), 'Repulsor emitter. Standby.', V(Math.cos(a), Math.sin(a), 0)); }
+
+/* ---------- wearable gauntlets ---------- */
+const gaunts = [0, 1].map(() => {
+  const root = new THREE.Group(), tilt = new THREE.Group(); root.add(tilt); root.visible = false;
+  const pivots = [0, 1, 2].map(i => {
+    const pv = new THREE.Group(), m = new THREE.Mesh(new THREE.TorusGeometry(.085 + i * .025, .005, 6, 32, Math.PI * 1.5), mat(i === 1 ? 0xffc94a : 0x5fe6ff, .95));
+    m.rotation.x = Math.PI / 2; pv.add(m); pv.position.y = i * .06 - .06; tilt.add(pv); return pv;
+  });
+  tilt.rotation.x = .9;
+  const palm = new THREE.Group(); palm.visible = false;
+  const orb = new THREE.Mesh(new THREE.IcosahedronGeometry(.04, 1), mat(0xcffaff, 1)); palm.add(orb);
+  const pr = [0, 1].map(i => { const m = new THREE.Mesh(new THREE.TorusGeometry(.07 + i * .03, .004, 6, 32, Math.PI * 1.4), mat(i ? 0xffc94a : 0x5fe6ff, .9)); palm.add(m); return m; });
+  scene.add(root, palm);
+  return { root, pivots, palm, orb, pr };
+});
+let gT = 0, gTarget = 0, snapT = -9, lastSnap = 0;
+const unwear = () => parts.forEach(p => { if (p.userData.worn != null) { obj.attach(p); p.userData.worn = null; } });
+const ease = x => x * x * (3 - 2 * x), clamp01 = x => Math.max(0, Math.min(1, x));
+function toggleSuit() {
+  gTarget = gTarget ? 0 : 1; snapT = performance.now() / 1000;
+  gTarget ? sfx.fit() : sfx.unfit();
+  msg.textContent = gTarget ? 'SNAP — rings engaged' : 'SNAP — rings released'; setTimeout(() => { msg.textContent = ''; }, 1500);
+}
+function wear(t, dt) {
+  gT += Math.sign(gTarget - gT) * Math.min(Math.abs(gTarget - gT), dt / 1.1);
+  gaunts.forEach((g, i) => {
+    const h = hands[i], on = h && gT > .001;
+    g.root.visible = g.palm.visible = !!on;
+    if (!on) return;
+    const wx = mx(h.lm[0].x), wy = my(h.lm[0].y), dx = wx - h.X, dy = wy - h.Y, l = Math.hypot(dx, dy) || 1, k = Math.max(.5, h.sz * 2 / .22);
+    g.root.position.set(wx + dx / l * .1 * k, wy + dy / l * .1 * k, .2);
+    g.root.rotation.z = Math.atan2(dy, dx) - Math.PI / 2; g.root.scale.setScalar(k);
+    g.pivots.forEach((pv, j) => {
+      const e = ease(clamp01(gT * 1.7 - j * .3));
+      pv.position.y = (j * .06 - .06) + (1 - e) * [-1, 1, -1][j] * .6;
+      pv.scale.setScalar(.3 + .7 * e);
+      pv.rotation.y = t * (j % 2 ? -2.2 : 2.6) * (1 + 3 * (1 - e)) + j;
+    });
+    const e = ease(clamp01(gT * 1.7 - .9));
+    const charge = h.open ? 1.25 + .1 * Math.sin(t * 8) : h.fist ? .6 : h.pin ? .9 : 1;
+    g.palm.position.set(h.X, h.Y, .25); g.palm.scale.setScalar(Math.max(.001, k * charge * e));
+    g.pr.forEach((m, j) => m.rotation.z = t * (j ? -3 : 3)); g.orb.rotation.y = t * 2;
+  });
+}
+
+/* ---------- layout ---------- */
+function layout() {
+  const vw = vid.videoWidth || 1280, vh = vid.videoHeight || 720;
+  const k = Math.min(innerWidth / vw, innerHeight / vh);
+  W = Math.round(vw * k); H = Math.round(vh * k);
+  stage.style.width = W + 'px'; stage.style.height = H + 'px';
+  [ov, glow].forEach(c => { c.width = W; c.height = H; });
+  renderer.setSize(W, H, false);
+  AR = W / H;
+  cam = new THREE.OrthographicCamera(-AR, AR, 1, -1, -10, 10);
+}
+addEventListener('resize', layout);
+const mx = x => ((S.mirror ? 1 - x : x) - .5) * 2 * AR, my = y => (.5 - y) * 2;
+
+/* ---------- ui state ---------- */
+function applyUI() {
+  vid.style.transform = S.mirror ? 'scaleX(-1)' : 'none';
+  vid.style.filter = `brightness(${S.dim}) saturate(.85)` + (S.bw ? ' grayscale(1)' : '');
+  $('#bMirror').textContent = 'Mirror ' + (S.mirror ? 'on' : 'off');
+  $('#bBw').textContent = 'B&W ' + (S.bw ? 'on' : 'off');
+  $('#bCam').textContent = 'Camera: ' + (devs[idx] ? (devs[idx].label || 'device ' + idx).slice(0, 18) : '…');
+}
+$('#bMirror').onclick = () => { S.mirror = !S.mirror; applyUI(); };
+$('#bBw').onclick = () => { S.bw = !S.bw; applyUI(); };
+$('#bCam').onclick = () => nextCam();
+$('#dim').oninput = e => { S.dim = e.target.value / 100; applyUI(); };
+
+/* ---------- audio ---------- */
+let micAn = null, micBuf = null, micAvg = .003, lastSfxEnd = 0;
+let ac = null, master = null, humG = null, humF = null, muted = false;
+function initAudio() {
+  if (ac) { ac.resume(); return; }
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  master = ac.createGain(); master.gain.value = muted ? 0 : .6; master.connect(ac.destination);
+  humF = ac.createBiquadFilter(); humF.type = 'lowpass'; humF.frequency.value = 300;
+  humG = ac.createGain(); humG.gain.value = 0;
+  [55, 82.6, 110.3].forEach(f => { const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f; o.connect(humF); o.start(); });
+  humF.connect(humG); humG.connect(master);
+  navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } }).then(st => {
+    const src = ac.createMediaStreamSource(st), hp = ac.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 1800;
+    micAn = ac.createAnalyser(); micAn.fftSize = 1024; micBuf = new Float32Array(1024);
+    src.connect(hp); hp.connect(micAn);
+    msg.textContent = 'Mic ready — snap your fingers'; setTimeout(() => { msg.textContent = ''; }, 2000);
+  }).catch(() => {});
+}
+function micPoll(now) {
+  if (!micAn) return;
+  micAn.getFloatTimeDomainData(micBuf);
+  let sum = 0; for (let i = 0; i < micBuf.length; i++) sum += micBuf[i] * micBuf[i];
+  const rms = Math.sqrt(sum / micBuf.length), spike = rms > .012 && rms > micAvg * 6;
+  micAvg += (rms - micAvg) * .03;
+  if (spike && now > lastSfxEnd + 150 && now - lastSnap > 900 && hands.length) { lastSnap = now; toggleSuit(); }
+}
+['pointerdown', 'keydown'].forEach(e => addEventListener(e, initAudio));
+function tone(f0, f1, dur, type = 'sine', vol = .1, delay = 0) {
+  if (!ac) return;
+  lastSfxEnd = Math.max(lastSfxEnd, performance.now() + (delay + dur) * 1000);
+  const t = ac.currentTime + delay, o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + .01); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  o.connect(g); g.connect(master); o.start(t); o.stop(t + dur + .05);
+}
+function noise(dur, vol, f0, f1) {
+  if (!ac) return;
+  lastSfxEnd = Math.max(lastSfxEnd, performance.now() + dur * 1000);
+  const n = ac.sampleRate * dur, b = ac.createBuffer(1, n, ac.sampleRate), c = b.getChannelData(0);
+  for (let i = 0; i < n; i++) c[i] = Math.random() * 2 - 1;
+  const s = ac.createBufferSource(); s.buffer = b;
+  const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = .8;
+  const t = ac.currentTime; f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  const g = ac.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  s.connect(f); f.connect(g); g.connect(master); s.start(t);
+}
+const sfx = {
+  spawn() { tone(180, 1600, .6, 'sawtooth', .08); tone(360, 3200, .7, 'sine', .07); noise(.5, .15, 500, 6000); },
+  explode() { noise(1, .6, 3000, 150); tone(140, 30, .9, 'sine', .6); tone(900, 200, .4, 'sawtooth', .05); },
+  assemble() { noise(.35, .25, 600, 5000); tone(1200, 150, .35, 'square', .05); tone(90, 50, .25, 'sine', .6, .3); },
+  pinch() { tone(1300, 1900, .07, 'sine', .08); },
+  pull() { tone(500, 1000, .15, 'triangle', .1); },
+  info() { tone(1500, 1500, .08, 'sine', .07); tone(2200, 2200, .1, 'sine', .07, .09); },
+  fit() { noise(.06, .6, 3500, 1500); noise(.5, .2, 400, 4000); [0, .15, .3].forEach((d, i) => tone(1800 + i * 400, 900 + i * 200, .08, 'square', .06, .12 + d)); tone(300, 700, .5, 'sine', .12, .5); },
+  unfit() { noise(.06, .5, 3500, 1500); noise(.45, .3, 4000, 300); tone(800, 100, .4, 'sawtooth', .05, .1); },
+  equip() { tone(700, 1400, .12, 'triangle', .1); tone(1400, 2100, .12, 'sine', .08, .08); },
+  clear() { tone(900, 100, .4, 'sawtooth', .06); }
+};
+
+/* ---------- camera ---------- */
+let devs = [], idx = 0, stream = null;
+async function startCam() {
+  try {
+    if (!devs.length) {
+      (await navigator.mediaDevices.getUserMedia({ video: true })).getTracks().forEach(t => t.stop());
+      devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+      const k = devs.findIndex(d => /scrcpy|v4l2|loopback|phone|dummy/i.test(d.label));
+      idx = k >= 0 ? k : 0;
+    }
+    stream && stream.getTracks().forEach(t => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: devs[idx].deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } } });
+    vid.srcObject = stream; await vid.play();
+    layout(); applyUI(); msg.textContent = '';
+  } catch (e) { msg.textContent = 'Camera error: ' + e.message + '. Check that the v4l2loopback device exists and scrcpy is running.'; }
+}
+function nextCam() { if (devs.length) { idx = (idx + 1) % devs.length; startCam(); } }
+
+/* ---------- hand tracking ---------- */
+const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
+let hands = [], lastR = performance.now(), gapRate = 0, prevGap = null;
+// adaptive filter: heavy smoothing when still, almost no lag when moving fast
+const oe = (a, b, dt) => { const sp = Math.hypot(b.x - a.x, b.y - a.y) / dt, al = 1 / (1 + 1 / (2 * Math.PI * (1.5 + 10 * sp) * dt)); return { x: a.x + (b.x - a.x) * al, y: a.y + (b.y - a.y) * al }; };
+let lastSeen = 0;
+function onResults(r) {
+  const now = performance.now(), dt = Math.max(.001, (now - lastR) / 1000); lastR = now;
+  const L = r.multiHandLandmarks || [], old = hands;
+  if (!L.length && old.length && now - lastSeen < 180) return; // brief dropout: hold last pose
+  if (L.length) lastSeen = now;
+  hands = L.map(raw => {
+    let o = null, bd = .25;
+    old.forEach(c => { const dd = d(c.lm[0], raw[0]); if (dd < bd) { bd = dd; o = c; } });
+    const lm = raw.map((p, k) => o ? oe(o.lm[k], p, dt) : { x: p.x, y: p.y });
+    const sz = d(lm[0], lm[9]), pr = d(lm[4], lm[8]) / sz;
+    const ext = [[8, 6], [12, 10], [16, 14], [20, 18]].map(([t, p]) => d(lm[t], lm[0]) > d(lm[p], lm[0]) * 1.1);
+    const n = ext.filter(Boolean).length, pin = o && o.pin ? pr < .55 : pr < .32;
+    const h = {
+      lm, sz, pin, fist: n === 0 && !pin, point: ext[0] && n === 1, open: n === 4 && !pin,
+      X: mx(lm[9].x), Y: my(lm[9].y), PX: mx((lm[4].x + lm[8].x) / 2), PY: my((lm[4].y + lm[8].y) / 2),
+      TX: mx(lm[8].x), TY: my(lm[8].y), a: Math.atan2(my(lm[9].y) - my(lm[0].y), mx(lm[9].x) - mx(lm[0].x)), vx: 0, vy: 0, da: 0
+    };
+    if (o) { h.vx = (h.TX - o.TX) / dt; h.vy = (h.TY - o.TY) / dt; h.da = wrap(h.a - o.a) / dt; }
+    const mm = d(lm[4], lm[12]) / sz;
+    h.mc = mm < (o && o.mc ? .6 : .42); h.mcStart = h.mc ? (o && o.mc ? o.mcStart : now) : 0;
+    if (!micAn && o && o.mc && !h.mc && !ext[1] && now - o.mcStart < 500 && now - lastSnap > 900) { lastSnap = now; toggleSuit(); }
+    if (pin && !(o && o.pin) && obj.visible) sfx.pinch();
+    return h;
+  });
+  if (hands.length === 2) {
+    const g = Math.hypot(hands[0].X - hands[1].X, hands[0].Y - hands[1].Y);
+    gapRate = prevGap == null ? 0 : (g - prevGap) / dt; prevGap = g;
+  } else { gapRate = 0; prevGap = null; }
+}
+
+/* ---------- gesture logic ---------- */
+const spin = new THREE.Vector2(), tmp = new THREE.Vector3(), wv = new THREE.Vector3();
+let infoDone = false, ex = 0, target = 0, pinchT = 0, grab = -1, together = 0, cool = 0, sc = 1, pulled = null, holdT = 0;
+function explode(v) { if (cool > 0) return; v ? sfx.explode() : sfx.assemble(); target = v; cool = 1; together = 0; if (!v) { parts.forEach(p => p.userData.pull = null); unwear(); } }
+
+function update(dt, t) {
+  cool = Math.max(0, cool - dt);
+  const hv = obj.visible ? .025 + .01 * ex + .015 * Math.min(1, spin.length() / 4) : 0;
+  if (humG) { humG.gain.value += (hv - humG.gain.value) * Math.min(1, dt * 4); humF.frequency.value = 250 + spin.length() * 80 + ex * 250; }
+  const two = hands.length === 2;
+  const pn = hands.find(h => h.pin);
+
+  if (!obj.visible) {
+    if (pn) { pinchT += dt; if (pinchT > .25) { obj.visible = true; obj.position.set(pn.PX, pn.PY, 0); sc = .05; ex = target = 0; sfx.spawn(); } }
+    else pinchT = 0;
+    tip.style.display = 'none';
+    return;
+  }
+  sc += (1 - sc) * Math.min(1, dt * 6); obj.scale.setScalar(sc);
+  if (grab >= hands.length) grab = -1;
+
+  hands.forEach((h, i) => {
+    if (h.fist) {
+      if (grab === i || Math.hypot(h.X - obj.position.x, h.Y - obj.position.y) < .6) {
+        grab = i;
+        const k = Math.min(1, dt * 14);
+        obj.position.x += (h.X - obj.position.x) * k; obj.position.y += (h.Y - obj.position.y) * k;
+      }
+      if (h.da > 4 && !target) explode(1);
+    } else if (grab === i) grab = -1;
+    if (h.point) { spin.y += h.vx * dt * 4; spin.x -= h.vy * dt * 4; }
+  });
+  spin.clampLength(0, 8);
+  obj.rotation.y += (spin.y + .25) * dt; obj.rotation.x += spin.x * dt;
+  spin.multiplyScalar(Math.pow(.4, dt));
+
+  if (two) {
+    const [a, b] = hands, gap = Math.hypot(a.X - b.X, a.Y - b.Y);
+    if (a.fist && b.fist && gapRate > 1.0 && gap > .4 && !target) explode(1);
+    if (a.open && b.open) {
+      if (target && gap < .25) explode(0);
+      else if (!target) { together = gap < .3 ? 1.2 : Math.max(0, together - dt); if (together > 0 && gap > .7) explode(1); }
+    }
+  }
+
+  ex += (target - ex) * Math.min(1, dt * 5);
+  core.scale.setScalar(1 + .08 * Math.sin(t * 4));
+  parts.forEach((p, k) => {
+    const u = p.userData;
+    if (u.worn != null) {
+      const h = hands[u.worn];
+      if (h) { const a = t * 2 + k * .9, w = .17 * Math.max(.5, h.sz * 2 / .22); p.position.lerp(tmp.set(mx(h.lm[0].x) + Math.cos(a) * w, my(h.lm[0].y) + Math.sin(a) * w, .1), Math.min(1, dt * 8)); p.rotation.z += dt * 2; }
+      return;
+    }
+    tmp.copy(u.pull || p.position.clone().copy(u.home).addScaledVector(u.away, ex));
+    p.position.lerp(tmp, Math.min(1, dt * 10));
+    if (ex > .05) p.rotation.z += u.spin * dt * ex * .3;
+  });
+
+  // pull a part out, hold for info
+  tip.style.display = 'none';
+  if (target) {
+    const h = hands.find(x => x.pin);
+    if (h) {
+      if (!pulled) {
+        let best = null, bd = .25;
+        parts.forEach(p => { p.getWorldPosition(wv); const dd = Math.hypot(wv.x - h.PX, wv.y - h.PY); if (dd < bd) { bd = dd; best = p; } });
+        if (best) { if (best.userData.worn != null) { obj.attach(best); best.userData.worn = null; } pulled = best; holdT = 0; infoDone = false; sfx.pull(); }
+      }
+      if (pulled) {
+        wv.set(h.PX, h.PY, 0); pulled.userData.pull = obj.worldToLocal(wv.clone());
+        holdT += dt;
+        if (holdT > .6) {
+          if (!infoDone) { infoDone = true; sfx.info(); }
+          tip.style.display = 'block';
+          tip.style.left = ((h.PX / AR + 1) / 2 * W + 16) + 'px';
+          tip.style.top = ((1 - h.PY) / 2 * H - 20) + 'px';
+          tip.innerHTML = '<b>' + pulled.userData.name + '</b><br>' + pulled.userData.info;
+        }
+      }
+    } else {
+      if (pulled) {
+        pulled.getWorldPosition(wv);
+        hands.forEach((hh, i) => { if (pulled && Math.hypot(wv.x - mx(hh.lm[0].x), wv.y - my(hh.lm[0].y)) < .3) { scene.attach(pulled); pulled.userData.worn = i; pulled.userData.pull = null; sfx.equip(); pulled = null; } });
+      }
+      pulled = null; holdT = 0;
+    }
+  } else { pulled = null; holdT = 0; }
+}
+
+/* ---------- HUD ---------- */
+const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+const P = (h, k) => [(S.mirror ? 1 - h.lm[k].x : h.lm[k].x) * W, h.lm[k].y * H];
+const circ = (x, y, r, a0 = 0, a1 = 7) => { octx.beginPath(); octx.arc(x, y, r, a0, a1); octx.stroke(); };
+function hud(t) {
+  octx.clearRect(0, 0, W, H);
+  hands.forEach((h, hi) => {
+    const col = h.pin ? '#ffc94a' : h.fist ? '#ff6a7a' : '#5fe6ff';
+    octx.strokeStyle = col; octx.fillStyle = col; octx.shadowColor = col; octx.shadowBlur = 10;
+    const [cx, cy] = P(h, 9), [wx, wy] = P(h, 0), r = Math.max(24, h.sz * H * .9);
+    // skeleton
+    octx.lineWidth = 1; octx.globalAlpha = .5;
+    BONES.forEach(([a, b]) => { const A = P(h, a), B = P(h, b); octx.beginPath(); octx.moveTo(A[0], A[1]); octx.lineTo(B[0], B[1]); octx.stroke(); });
+    octx.globalAlpha = 1;
+    // palm rings
+    octx.lineWidth = 2; circ(cx, cy, r * .8);
+    octx.setLineDash([5, 9]); octx.lineDashOffset = -t * 40; circ(cx, cy, r * 1.1);
+    octx.setLineDash([]); circ(cx, cy, r * 1.4, t * 2, t * 2 + 1.5); circ(cx, cy, r * 1.4, t * 2 + 3.14, t * 2 + 4.64);
+    // wrist bands
+    const fa = Math.atan2(wy - cy, wx - cx);
+    [0, 1].forEach(i => { octx.lineWidth = 2 - i * .6; octx.beginPath(); octx.ellipse(wx + Math.cos(fa) * r * .45 * i, wy + Math.sin(fa) * r * .45 * i, r * (.6 - i * .12), r * (.22 - i * .04), fa + Math.PI / 2, 0, 7); octx.stroke(); });
+    // knuckles + joints
+    [5, 9, 13, 17, 3, 7, 11, 15, 19].forEach(k => { const [x, y] = P(h, k); octx.beginPath(); octx.arc(x, y, 2.5, 0, 7); octx.fill(); });
+    // fingertip rings
+    [4, 8, 12, 16, 20].forEach(k => {
+      const [x, y] = P(h, k), big = h.pin && (k === 4 || k === 8);
+      octx.lineWidth = 1.5; circ(x, y, (big ? 13 : 8) + Math.sin(t * 6 + k) * 1.5);
+      octx.beginPath(); octx.arc(x, y, 3, 0, 7); octx.fill();
+    });
+    if (h.pin) {
+      const A = P(h, 4), B = P(h, 8), mx_ = (A[0] + B[0]) / 2, my_ = (A[1] + B[1]) / 2;
+      octx.beginPath(); octx.moveTo(A[0], A[1]); octx.lineTo(B[0], B[1]); octx.stroke();
+      octx.lineWidth = 2; circ(mx_, my_, 18 + Math.sin(t * 10) * 3);
+    }
+    // readout
+    octx.shadowBlur = 0; octx.font = '12px "Chakra Petch",monospace';
+    octx.fillText('HAND-0' + (hi + 1) + ' / ' + (h.pin ? 'PINCH' : h.fist ? 'FIST' : h.point ? 'POINT' : h.open ? 'OPEN' : 'TRACK'), cx + r * 1.5, cy - 4);
+    octx.fillText('X ' + h.X.toFixed(2) + '  Y ' + h.Y.toFixed(2), cx + r * 1.5, cy + 10);
+    if (S.debug) h.lm.forEach((p, k) => octx.fillText(k, (S.mirror ? 1 - p.x : p.x) * W + 4, p.y * H));
+  });
+  const sa = t - snapT;
+  if (sa >= 0 && sa < .7) {
+    octx.strokeStyle = '#ffc94a'; octx.shadowColor = '#ffc94a'; octx.shadowBlur = 14; octx.lineWidth = 3; octx.globalAlpha = 1 - sa / .7;
+    hands.forEach(h => { const [cx, cy] = P(h, 9); circ(cx, cy, 20 + sa * 420); });
+    octx.globalAlpha = 1;
+  }
+  octx.shadowBlur = 0;
+}
+
+/* ---------- keys ---------- */
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === 'e' && obj.visible) { cool = 0; explode(target ? 0 : 1); }
+  else if (k === 'f') { S.mirror = !S.mirror; applyUI(); }
+  else if (k === 'b') { S.bw = !S.bw; applyUI(); }
+  else if (k === 'c') nextCam();
+  else if (k === 'd') S.debug = !S.debug;
+  else if (k === 'm') { muted = !muted; if (master) master.gain.value = muted ? 0 : .6; }
+  else if (k === 'w' || k === 's') toggleSuit();
+  else if (k === 'x') { unwear(); sfx.clear(); obj.visible = false; target = ex = 0; parts.forEach(p => p.userData.pull = null); }
+});
+
+/* ---------- main ---------- */
+const hd = new Hands({ locateFile: f => 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/' + f });
+hd.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: .5, minTrackingConfidence: .5 });
+hd.onResults(onResults);
+function pump() {
+  const go = async () => {
+    if (vid.readyState >= 2) { try { await hd.send({ image: vid }); } catch (e) { msg.textContent = 'Tracking error: ' + e.message; } }
+    vid.requestVideoFrameCallback ? vid.requestVideoFrameCallback(go) : requestAnimationFrame(go);
+  };
+  go();
+}
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  if (!W) return;
+  micPoll(now);
+  update(dt, now / 1000);
+  wear(now / 1000, dt);
+  renderer.render(scene, cam);
+  gctx.clearRect(0, 0, W, H);
+  gctx.filter = 'blur(10px)'; gctx.drawImage(renderer.domElement, 0, 0, W, H); gctx.filter = 'none';
+  hud(now / 1000);
+}
+applyUI();
+startCam().then(() => { pump(); });
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
